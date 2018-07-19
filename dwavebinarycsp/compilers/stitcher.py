@@ -128,8 +128,8 @@ def stitch(csp, min_classical_gap=2.0, max_graph_size=8):
 
     # developer note: we could cache them and relabel, for now though let's do the simple thing
     # penalty_models = {}
+    all_pmodels = dict()
     for const in csp.constraints:
-        configurations = const.configurations
 
         if len(const.variables) > max_graph_size:
             msg = ("The given csp contains a constraint {const} with {num_var} variables. "
@@ -138,55 +138,59 @@ def stitch(csp, min_classical_gap=2.0, max_graph_size=8):
                    "").format(const=const, num_var=len(const.variables), max_graph_size=max_graph_size)
             raise ImpossibleBQM(msg)
 
-        pmodel = None
-
         if len(const) == 0:
             # empty constraint
             continue
 
-        if min_classical_gap <= 2.0:
-            if len(const) == 1 and max_graph_size >= 1:
-                bqm.update(_bqm_from_1sat(const))
-                continue
-            elif len(const) == 2 and max_graph_size >= 2:
-                bqm.update(_bqm_from_2sat(const))
-                continue
-
-        # developer note: we could cache them and relabel, for now though let's do the simple thing
-        # if configurations in penalty_models:
-        #     raise NotImplementedError
-
-        for G in iter_complete_graphs(const.variables, max_graph_size + 1, aux):
-
-            # construct a specification
-            spec = pm.Specification(
-                graph=G,
-                decision_variables=const.variables,
-                feasible_configurations=configurations,
-                vartype=csp.vartype
-            )
-
-            # try to use the penaltymodel ecosystem
-            try:
-                pmodel = pm.get_penalty_model(spec)
-            except pm.ImpossiblePenaltyModel:
-                # hopefully adding more variables will make it possible
-                continue
-
-            if pmodel.classical_gap >= min_classical_gap:
-                break
-
         # developer note: we could cache them and relabel, for now though let's do the simple thing
         # penalty_models[configurations] = pmodel
+        pmodel = _build_penalty_model_from_constraint(const, aux, min_classical_gap, max_graph_size)
 
         if pmodel is None:
             msg = ("No penalty model can be build for constraint {}".format(const))
             raise ImpossibleBQM(msg)
 
         bqm.update(pmodel.model)
+        all_pmodels[const] = pmodel
 
-    return bqm
+    return bqm, all_pmodels
 
+def _build_penalty_model_from_constraint(const, aux, min_classical_gap=2.0, max_graph_size=8):
+    """Given a constraint, build a penalty model for that constraint using a minimal number of spins subject to have
+    an energy gap at least min_classical_gap. For the number of spins used, the energy gap will be as large as possible.
+    The model generation will fail if more than max_graph_size spins are needed.
+    """
+    if min_classical_gap <= 2.0:
+        if len(const) == 1 and max_graph_size >= 1:
+            return _bqm_from_1sat(const)
+        elif len(const) == 2 and max_graph_size >= 2:
+            return _bqm_from_2sat(const)
+
+    # developer note: we could cache them and relabel, for now though let's do the simple thing
+    # if configurations in penalty_models:
+    #     raise NotImplementedError
+    configurations = const.configurations
+    for G in iter_complete_graphs(const.variables, max_graph_size + 1, aux):
+
+        # construct a specification
+        spec = pm.Specification(
+            graph=G,
+            decision_variables=const.variables,
+            feasible_configurations=configurations,
+            vartype=const.vartype
+        )
+
+        # try to use the penaltymodel ecosystem
+        try:
+            pmodel = pm.get_penalty_model(spec)
+        except pm.ImpossiblePenaltyModel:
+            # hopefully adding more variables will make it possible
+            continue
+
+        if pmodel.classical_gap >= min_classical_gap:
+            break
+
+    return pmodel
 
 def _bqm_from_1sat(constraint):
     """create a bqm for a constraint with only one variable
