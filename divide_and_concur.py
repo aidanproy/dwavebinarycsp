@@ -33,25 +33,17 @@ class DivideAndConcur(Sampler):
         variables.
 
     """
+    properties = None
+    parameters = None
 
-    def __init__(self, factors, factor_sampler, difference_mapping = True):
-        Sampler.__init__(self)
+    def __init__(self, factors, factor_sampler):
+        #Sampler.__init__(self)
         # factors should be a list of bqms
         self._factors = factors
         self._factor_sampler = factor_sampler
-        self._difference_mapping = difference_mapping
+        #self.parameters = {}
+        #self.properties = {}
 
-
-    @property
-    def properties(self):
-        # fill this in.
-        return dict()
-
-
-    @property
-    def parameters(self):
-        # fill this in.
-        return dict()
 
     @staticmethod
     def _average_messages(messages, factors_per_variable):
@@ -62,10 +54,10 @@ class DivideAndConcur(Sampler):
             for f in factors:
                 messages[f][variable] = avg
 
-    def sample(self, bqm, verbosity = 1):
+    def sample(self, bqm, difference_mapping=True, max_iters=100, verbosity=1, bias_scale=None):
         """Solves the bqm problem.
 
-        The Ising problem should differ from the sum of the factors by at most a linear term.
+        The Ising problem should differ from the sum of the {v: solution[v] for v in all_variables}factors by at most a linear term.
 
         """
         if self._factors[0].vartype is not dimod.BINARY:
@@ -104,14 +96,18 @@ class DivideAndConcur(Sampler):
             for variable in variables_per_factor[factor]:
                 vf_messages[factor][variable] = initialization_scale * (1-2*random.random())
 
-        iter_count = 0
-        max_iters = 100
-        # multiplier for linear biases:
-        mult = 1./max([len(factors_per_variable[v]) for v in all_variables]+[3])
-        # repeat:
+        # initialize variables
+
+        # solutions from the factors result in messages which apply biases to the variables.
+        # by default, this bias is scaled down by the maximum number of factors that any variable appears in.
+        if bias_scale is None:
+            bias_scale = 1./max([len(factors_per_variable[v]) for v in all_variables])
         finished = False
         solution = dict()
         diff = dict()
+        iter_count = 0
+        best_energy = 1e20
+        # repeat:
         while not finished:
 
             # "DIVIDE"
@@ -127,13 +123,13 @@ class DivideAndConcur(Sampler):
                 sample = next(response.samples(1, sorted_by='energy'))
 
                 # translate samples into messages
-                fv_messages[factor] = {v: mult*(1-2*sample[v]) for v in variables_per_factor[factor]}
+                fv_messages[factor] = {v: bias_scale*(1-2*sample[v]) for v in variables_per_factor[factor]}
 
                 # record the solution values
                 solution.update(sample)
 
             # "CONCUR"
-            if self._difference_mapping:
+            if difference_mapping:
                 # compute differences and add twice their amounts
                 for factor in self._factors:
                     diff[factor] = {v: fv_messages[factor][v] - vf_messages[factor][v] for v in variables_per_factor[factor]}
@@ -154,6 +150,12 @@ class DivideAndConcur(Sampler):
             # update full solution
             for variable in all_variables:
                 solution[v] = int(sum([new_vf_messages[f][variable] for f in factors_per_variable[variable]]) < 0)
+                energy = bqm.energy(solution)
+
+            # record the best solution
+            if energy < best_energy:
+                best_energy = energy
+                best_solution = solution.copy()
             # possible termination condition for CSP: all constraints are satisfied
 
             # termination condition: no change in messages
@@ -161,6 +163,8 @@ class DivideAndConcur(Sampler):
                                      variables_per_factor[f])
             if max_message_change < 1e-3:
                 finished = True
+                # if messages have converged, take current solution as best answer.
+                best_solution = solution
 
             # finally, overwrite the messages
             vf_messages = new_vf_messages.copy()
@@ -171,10 +175,9 @@ class DivideAndConcur(Sampler):
                 message_size = max(abs(m) for m in new_vf_messages[f].values() for f in self._factors)
                 print "\tMaximum message size: %0.3g" % message_size
                 print "\tMaximum message change: %0.3g" % max_message_change
-                unanimous_variables = sum(int(abs(sum(fv_messages[f][v] for f in factors_per_variable[v]))==mult*len(
+                unanimous_variables = sum(int(abs(sum(fv_messages[f][v] for f in factors_per_variable[v]))==bias_scale*len(
                     factors_per_variable[v])) for v in all_variables)
                 print "\tUnanimous variables: %d" % unanimous_variables
-                energy = bqm.energy(solution)
                 print "\tCurrent solution:", {v: solution[v] for v in all_variables}
                 print "\tEnergy: %0.3g" % energy
 
@@ -185,19 +188,21 @@ class DivideAndConcur(Sampler):
 
         # having settled on values for the message variables, find values for the other variables.
         for factor in self._factors:
+            # fix the message variables to the current solution
             biased_bqm = factor.bqm.copy()
             for variable in variables_per_factor[factor]:
-                biased_bqm.fix_variable(variable, solution[variable])
+                biased_bqm.fix_variable(variable, best_solution[variable])
 
+            # solve for the other variables
             response = self._factor_sampler.sample(biased_bqm)  # , num_reads=1)
             sample = next(response.samples(1, sorted_by='energy'))
-            solution.update(sample)
+            best_solution.update(sample)
 
         # add the sample to the response object
-        energy = bqm.energy(solution)
+        energy = bqm.energy(best_solution)
         if verbosity >= 1:
             print "Final energy: %0.3g" % energy
-        return Response.from_dicts([solution], {'energy': [energy]}, vartype=bqm.vartype)
+        return Response.from_dicts([best_solution], {'energy': [energy]}, vartype=bqm.vartype)
 
 
 
